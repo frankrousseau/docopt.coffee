@@ -1,10 +1,17 @@
 print = -> console.log [].join.call arguments, ' '
 
+atos = Array.prototype.toString
+Array.prototype.toString = -> '[' + atos.call(@) + ']'
+
+
+# Exception Raised when a language eror occured"
 class DocoptLanguageError extends Error
+
     constructor: (@message) ->
         print @message
 
 
+# Big exception leading to a proccess exit with code 1
 class DocoptExit extends Error
 
     constructor: (message) ->
@@ -13,48 +20,60 @@ class DocoptExit extends Error
         process.exit 1
 
 
+# Base class to describe a docopt tree node.
+# Every node has children
+# child has no children.
 class Pattern
 
     constructor: (@children=[]) ->
 
     valueOf: @toString
 
+    # Print the whole tree below current node as a flat string.
     toString: ->
         formals = @children.join ', '
-        "#{@constructor.name}(#{formals})"
+        "\n#{@constructor.name}\n    (#{formals})"
 
     match: -> throw new Error("""classes inheriting from Pattern
                                  must overload the match method""")
 
+    # return pattern as an array.
     flat: ->
         if not @hasOwnProperty 'children' then return [@]
         res = []
         res = res.concat child.flat() for child in @children
         res
 
+    # Make pattern-tree tips point to same object if they are equal.
+    # and find arguments that should accumulate values and fix them.
     fix: ->
         @fix_identities()
         @fix_list_arguments()
 
+    # Make pattern-tree tips point to same object if they are equal.
     fix_identities: (uniq=null) ->
-        """Make pattern-tree tips point to same object if they are equal."""
 
         if not @hasOwnProperty 'children' then return @
+
+        # make an hash with all pattern in the below tree and make sure
+        # there is no duplicate.
+        # this is called only one time for the root pattern.
         if uniq is null
             [uniq, flat] = [{}, @flat()]
-            uniq[k] = k for k in flat
+            uniq[pattern] = pattern for pattern in flat
 
+        # Make every similar leaves point to the same object.
         i = 0
-        enumerate = ([i++, c] for c in @children)
-        for [i, c] in enumerate
-            if not c.hasOwnProperty 'children'
-                @children[i] = uniq[c]
+        enumerate = ([i++, child] for child in @children)
+        for [i, child] in enumerate
+            if not child.hasOwnProperty 'children'
+                @children[i] = uniq[child]
             else
-                c.fix_identities uniq
+                child.fix_identities uniq
         @
 
+    # Find arguments that should accumulate values and fix them.
     fix_list_arguments: ->
-        """Find arguments that should accumulate values and fix them."""
         either = (c.children for c in @either().children)
         for child in either
             counts = {}
@@ -64,47 +83,59 @@ class Pattern
                 when counts[e] > 1 and e.constructor is Argument
         @
 
+
     either: ->
+        # If current pattern is a leaf, it is considered as required for
+        # current expression to match the whole pattern.
         if not @hasOwnProperty 'children'
             return new Either [new Required [@]]
         else
             ret = []
             groups = [[@]]
+
             while groups.length
                 children = groups.shift()
                 [i, indices, types] = [0, {}, {}]
-                zip = ([i++, c] for c in children)
-                for [i,c] in zip
-                    name = c.constructor.name
-                    if name not of types
-                        types[name] = []
-                    types[name].push c
-                    if c not of indices
-                        indices[c] = i
+                zip = ([i++, child] for child in children)
+
+                for [i, child] in zip
+                    name = child.constructor.name
+
+                    types[name] = [] if name not of types
+                    types[name].push child
+
+                    if child not of indices
+                        indices[child] = i
+
                 if either = types[Either.name]
                     either = either[0]
                     children.splice indices[either], 1
-                    for c in either.children
-                        group = [c].concat children
+                    for child in either.children
+                        group = [child].concat children
                         groups.push group
+
                 else if required = types[Required.name]
                     required = required[0]
                     children.splice indices[required], 1
                     group = required.children.concat children
                     groups.push group
+
                 else if optional = types[Optional.name]
                     optional = optional[0]
                     children.splice indices[optional], 1
                     group = optional.children.concat children
                     groups.push group
+
                 else if oneormore = types[OneOrMore.name]
                     oneormore = oneormore[0]
                     children.splice indices[oneormore], 1
                     group = oneormore.children
                     group = group.concat group, children
                     groups.push group
+
                 else
                     ret.push children
+
             return new Either(new Required e for e in ret)
 
 
@@ -120,14 +151,17 @@ class Argument extends Pattern
         args = (l for l in left when l.constructor is Argument)
         if not args.length then return [false, left, collected]
         left = (l for l in left when l.toString() isnt args[0].toString())
+
         if @value is null or @value.constructor isnt Array
             collected = collected.concat [new Argument @name(), args[0].value]
             return [true, left, collected]
         same_name = (a for a in collected \
             when a.constructor is Argument and a.name() is @name())
+
         if same_name.length > 0
             same_name[0].value.push args[0].value
             return [true, left, collected]
+
         else
             collected = collected.concat [new Argument @name(), [args[0].value]]
             return [true, left, collected]
@@ -144,11 +178,17 @@ class Command extends Pattern
 
     match: (left, collected=[]) ->
         args = (l for l in left when l.constructor is Argument)
-        if not args.length or args[0].value isnt @name()
+
+        if not args.length or (args[0].value isnt @name())
+
+            for cmd in collected
+                if cmd?.cmdname is @name()
+                    return [true, left, collected]
             return [false, left, collected]
-        left.splice(left.indexOf(args[0]), 1)
-        collected.push new Command @name(), true
-        [true, left, collected]
+        else
+            left.splice(left.indexOf(args[0]), 1)
+            collected.push new Command @name(), true
+            [true, left, collected]
 
 
 class Option extends Pattern
@@ -198,8 +238,8 @@ class Required extends Pattern
     match: (left, collected=[]) ->
         l = left #copy(left)
         c = collected #copy(collected)
-        for p in @children
-            [matched, l, c] = p.match(l, c)
+        for child in @children
+            [matched, l, c] = child.match(l, c)
             if not matched
                 return [false, left, collected]
         [true, l, c]
@@ -236,9 +276,11 @@ class Either extends Pattern
 
     match: (left, collected=[]) ->
         outcomes = []
-        for p in @children
-            outcome = p.match(left, collected)
+
+        for child in @children
+            outcome = child.match(left, collected)
             if outcome[0] then outcomes.push(outcome)
+
         if outcomes.length > 0
             outcomes.sort((a,b) ->
                 if a[1].length > b[1].length
@@ -248,7 +290,8 @@ class Either extends Pattern
                 else
                     0)
             return outcomes[0]
-        [false, left, collected]
+        else
+            return [false, left, collected]
 
 
 # same as TokenStream in python
@@ -425,7 +468,7 @@ parse_args = (source, options) ->
     return opts
 
 parse_doc_options = (doc) ->
-    (Option.parse('-' + s) for s in doc.split(/^\s*-|\n\s*-/)[1..])
+    (Option.parse('-' + s) for s in doc.split(/^ *-|\n *-/)[1..])
 
 printable_usage = (doc, name) ->
     usage_split = doc.split(/(usage:)/i)
@@ -460,25 +503,25 @@ class Dict extends Object
         '{' + (k + ': ' + @[k] for k in atts).join(',\n ') + '}'
 
 docopt = (doc, kwargs={}) ->
+
+    ## Manage optional arguments related to docopt features
     allowedargs = ['argv', 'name', 'help', 'version']
     throw new Error "unrecognized argument to docopt: " for arg of kwargs \
         when arg not in allowedargs
 
-    argv    = if kwargs.argv is undefined \
-              then process.argv[2..] else kwargs.argv
-    name    = if kwargs.name is undefined \
-              then null else kwargs.name
-    help    = if kwargs.help is undefined \
-              then true else kwargs.help
-    version = if kwargs.version is undefined \
-              then null else kwargs.version
+    argv = if kwargs.argv? then kwargs.arg else process.argv[2..]
+    name = if kwargs.name? then kwargs.name else null
+    help = if kwargs.help? then kwargs.help else true
+    version = if kwargs.version? then kwargs.version else null
+
 
     usage = printable_usage doc, name
     pot_options = parse_doc_options doc
-    formal_pattern   = parse_pattern formal_usage(usage), pot_options
+    formal_pattern = parse_pattern formal_usage(usage), pot_options
 
     argv = parse_args argv, pot_options
     extras help, version, argv, doc
+
     [matched, left, argums] = formal_pattern.fix().match argv
     if matched and left.length is 0  # better message if left?
         options = (opt for opt in argv when opt.constructor is Option)
